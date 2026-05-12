@@ -1,7 +1,7 @@
 """Command-line entry point for the ``detect`` tool.
 
-Phases 1–2 implemented: ``info``, ``fetch``, ``parse``, ``features``.
-``train`` and ``score`` are placeholders for Phase 3.
+Phases 1–3 implemented: ``info``, ``fetch``, ``parse``, ``features``,
+``train``, ``score``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import __version__
 from .data import DATASETS, fetch
-from .paths import PROCESSED_DIR, RAW_DIR, ensure_dirs
+from .paths import MODELS_DIR, PROCESSED_DIR, RAW_DIR, REPORTS_DIR, ensure_dirs
 
 
 def _cmd_fetch(args: argparse.Namespace) -> int:
@@ -119,12 +119,98 @@ def _cmd_features(args: argparse.Namespace) -> int:
     return 0
 
 
-def _not_implemented(name: str):
-    def _run(_: argparse.Namespace) -> int:
-        print(f"`detect {name}` is not implemented yet (planned for a later phase).")
+def _cmd_train(args: argparse.Namespace) -> int:
+    from .features import FeatureMatrix
+    from .models import build_detector
+
+    ensure_dirs()
+    train_path = Path(args.features) if args.features else PROCESSED_DIR / "features_train.npz"
+    if not train_path.exists():
+        print(f"Training features not found: {train_path}. Run `detect features` first.")
         return 2
 
-    return _run
+    fm = FeatureMatrix.load(train_path)
+    X_fit = fm.X
+
+    # Autoencoder defaults to training on normal-only data (canonical AD setup).
+    # Use --normal-only / --all-data to override.
+    if args.normal_only is None:
+        normal_only = args.model == "autoencoder"
+    else:
+        normal_only = args.normal_only
+
+    if normal_only:
+        if fm.y is None:
+            print("--normal-only requires labels in the features file; aborting.")
+            return 2
+        X_fit = fm.X[fm.y == 0]
+        print(
+            f"Training {args.model} on {X_fit.shape[0]} normal sessions "
+            f"(of {fm.X.shape[0]} total) x {fm.X.shape[1]} templates..."
+        )
+    else:
+        print(
+            f"Training {args.model} on {fm.X.shape[0]} sessions "
+            f"x {fm.X.shape[1]} templates..."
+        )
+
+    detector = build_detector(args.model)
+    detector.fit(X_fit)
+
+    out_path = Path(args.output) if args.output else MODELS_DIR / f"{args.model}.bin"
+    detector.save(out_path)
+    print(f"Saved {args.model} model -> {out_path}")
+    return 0
+
+
+def _cmd_score(args: argparse.Namespace) -> int:
+    import numpy as np
+
+    from .evaluate import evaluate
+    from .features import FeatureMatrix
+    from .models import load_detector
+
+    ensure_dirs()
+    model_path = Path(args.model)
+    if not model_path.exists():
+        print(f"Model not found: {model_path}. Run `detect train` first.")
+        return 2
+
+    features_path = Path(args.features) if args.features else PROCESSED_DIR / "features_test.npz"
+    if not features_path.exists():
+        print(f"Features not found: {features_path}.")
+        return 2
+
+    detector = load_detector(model_path)
+    fm = FeatureMatrix.load(features_path)
+    scores = detector.score(fm.X)
+
+    scores_out = Path(args.scores_out) if args.scores_out else REPORTS_DIR / "scores.csv"
+    scores_out.parent.mkdir(parents=True, exist_ok=True)
+    with open(scores_out, "w", encoding="utf-8") as f:
+        f.write("session_id,score" + (",label\n" if fm.y is not None else "\n"))
+        for i, sid in enumerate(fm.session_ids):
+            if fm.y is not None:
+                f.write(f"{sid},{scores[i]:.6f},{int(fm.y[i])}\n")
+            else:
+                f.write(f"{sid},{scores[i]:.6f}\n")
+    print(f"Scored {len(scores)} sessions -> {scores_out}")
+
+    if fm.y is not None:
+        report = evaluate(np.asarray(fm.y), scores, threshold=args.threshold)
+        metrics_out = (
+            Path(args.metrics_out) if args.metrics_out else REPORTS_DIR / "metrics.json"
+        )
+        report.to_json(metrics_out)
+        print(
+            f"  threshold={report.threshold:.4f}  "
+            f"precision={report.precision:.3f}  recall={report.recall:.3f}  "
+            f"f1={report.f1:.3f}  roc_auc={report.roc_auc:.3f}  pr_auc={report.pr_auc:.3f}"
+        )
+        print(f"Saved metrics -> {metrics_out}")
+    else:
+        print("No labels in features file; skipping metrics.")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -173,9 +259,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_feat.add_argument("--seed", type=int, default=42)
     p_feat.set_defaults(func=_cmd_features)
 
-    for placeholder in ("train", "score"):
-        p = sub.add_parser(placeholder, help=f"[planned] {placeholder} pipeline step.")
-        p.set_defaults(func=_not_implemented(placeholder))
+    p_train = sub.add_parser("train", help="Train an anomaly detector on a feature matrix.")
+    p_train.add_argument(
+        "--model", choices=("iforest", "autoencoder"), default="iforest",
+        help="Detector type.",
+    )
+    p_train.add_argument("--features", help="Path to features_train.npz.")
+    p_train.add_argument("--output", help="Where to save the trained model.")
+    p_train.add_argument(
+        "--normal-only", dest="normal_only", action="store_true", default=None,
+        help="Train on labeled-normal sessions only (default for autoencoder).",
+    )
+    p_train.add_argument(
+        "--all-data", dest="normal_only", action="store_false",
+        help="Train on all sessions, ignoring labels (default for iforest).",
+    )
+    p_train.set_defaults(func=_cmd_train)
+
+    p_score = sub.add_parser(
+        "score",
+        help="Score a feature matrix with a saved model; emit per-session scores + metrics.",
+    )
+    p_score.add_argument("--model", required=True, help="Path to a saved model file.")
+    p_score.add_argument("--features", help="Path to features_test.npz.")
+    p_score.add_argument("--scores-out", help="Where to write per-session scores CSV.")
+    p_score.add_argument("--metrics-out", help="Where to write metrics JSON.")
+    p_score.add_argument(
+        "--threshold", type=float, default=None,
+        help="Fixed anomaly threshold. If omitted, the best-F1 threshold is chosen.",
+    )
+    p_score.set_defaults(func=_cmd_score)
 
     return parser
 
