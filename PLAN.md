@@ -25,7 +25,7 @@ Two viable starting points:
 
 ---
 
-## Phase 1 — Foundation (1–2 days)
+## Phase 1 — Foundation (1–2 days) ✅ complete
 
 1. Python project scaffold:
    - `pyproject.toml`
@@ -45,7 +45,7 @@ Two viable starting points:
 
 ---
 
-## Phase 2 — Parsing & Feature Engineering (2–3 days)
+## Phase 2 — Parsing & Feature Engineering (2–3 days) ✅ complete
 
 5. **Log template extraction** with Drain3 — converts raw lines into event IDs.
    - Example: `Received block blk_123 from 10.0.0.1` → template `E5`.
