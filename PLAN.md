@@ -61,7 +61,7 @@ Two viable starting points:
 
 ---
 
-## Phase 3 — Models (3–5 days)
+## Phase 3 — Models (3–5 days) ✅ complete (LSTM stretch goal deferred)
 
 9. **Baseline: Isolation Forest** on count-vector features.
    - Fast, no GPU, good reference ROC/PR numbers.
