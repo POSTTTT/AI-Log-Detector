@@ -22,9 +22,11 @@ ENV/
 data/raw/*
 data/processed/*
 data/live/*
+data/training/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/live/.gitkeep
+!data/training/.gitkeep
 
 # Docker local env overrides
 docker/.env
