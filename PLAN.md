@@ -98,7 +98,7 @@ Two viable starting points:
 
 ---
 
-## Phase 5 — Demo & Polish (1–2 days)
+## Phase 5 — Demo & Polish (1–2 days) ✅ complete
 
 18. **Kibana dashboard:**
     - Anomaly score timeline.
