@@ -21,8 +21,13 @@ ENV/
 # Project data — not committed
 data/raw/*
 data/processed/*
+data/live/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+!data/live/.gitkeep
+
+# Docker local env overrides
+docker/.env
 
 # Trained models and reports — large / generated
 models/*

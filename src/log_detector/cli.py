@@ -54,14 +54,25 @@ def _cmd_parse(args: argparse.Namespace) -> int:
         dataset_dir = RAW_DIR / DATASETS[args.dataset].extracted_dir
         log_path = _resolve_hdfs_log(dataset_dir)
 
+    state_path = Path(args.drain3_state) if args.drain3_state else MODELS_DIR / "drain3.bin"
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    # Drain3's FilePersistence is incremental; clear stale state on retrain.
+    if state_path.exists():
+        state_path.unlink()
+
     print(f"Parsing {log_path} (limit={args.limit})...")
-    df = parse_hdfs_log(log_path, limit=args.limit, show_progress=True)
+    df = parse_hdfs_log(
+        log_path, limit=args.limit, show_progress=True, state_path=state_path
+    )
     out = Path(args.output) if args.output else PROCESSED_DIR / "parsed.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df_to_save = df.copy()
     df_to_save["block_ids"] = df_to_save["block_ids"].apply(lambda xs: " ".join(xs))
     df_to_save.to_csv(out, index=False)
-    print(f"Parsed {len(df):,} lines, {df['event_id'].nunique()} templates -> {out}")
+    print(
+        f"Parsed {len(df):,} lines, {df['event_id'].nunique()} templates -> {out} "
+        f"(Drain3 state -> {state_path})"
+    )
     return 0
 
 
@@ -91,6 +102,13 @@ def _cmd_features(args: argparse.Namespace) -> int:
 
     fm = build_count_matrix(sessions)
     print(f"Feature matrix: {fm.X.shape} over {len(fm.event_ids)} templates.")
+
+    # Persist the event-id vocab so the streaming scorer uses the same columns.
+    import numpy as np
+
+    vocab_path = MODELS_DIR / "vocab.npy"
+    vocab_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(vocab_path, fm.event_ids)
 
     labels_path = Path(args.labels) if args.labels else None
     if labels_path is None and args.dataset:
@@ -160,6 +178,50 @@ def _cmd_train(args: argparse.Namespace) -> int:
     out_path = Path(args.output) if args.output else MODELS_DIR / f"{args.model}.bin"
     detector.save(out_path)
     print(f"Saved {args.model} model -> {out_path}")
+    return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from elasticsearch import Elasticsearch
+
+    from .streaming import Scorer, StreamConfig
+
+    ensure_dirs()
+    model_path = Path(args.model)
+    drain3_path = Path(args.drain3_state) if args.drain3_state else MODELS_DIR / "drain3.bin"
+    vocab_path = Path(args.vocab) if args.vocab else MODELS_DIR / "vocab.npy"
+    for p, label in [
+        (model_path, "model"),
+        (drain3_path, "Drain3 state"),
+        (vocab_path, "vocab"),
+    ]:
+        if not p.exists():
+            print(f"Missing {label} file: {p}")
+            return 2
+
+    es = Elasticsearch(args.es_url, request_timeout=30)
+    config = StreamConfig(
+        source_index=args.source_index,
+        dest_index=args.dest_index,
+        interval_seconds=args.interval,
+        batch_size=args.batch_size,
+        threshold=args.threshold,
+    )
+    scorer = Scorer(
+        es=es,
+        model_path=model_path,
+        drain3_state_path=drain3_path,
+        vocab_path=vocab_path,
+        config=config,
+    )
+    print(
+        f"[scorer] reading from {config.source_index}, writing to {config.dest_index} "
+        f"every {config.interval_seconds:.0f}s. Ctrl-C to stop."
+    )
+    try:
+        scorer.run_forever(max_iters=args.max_iters)
+    except KeyboardInterrupt:
+        print("[scorer] interrupted; exiting cleanly.")
     return 0
 
 
@@ -243,6 +305,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None,
         help="Cap number of input lines (handy for smoke runs).",
     )
+    p_parse.add_argument(
+        "--drain3-state",
+        help="Where to persist Drain3 template state (default: models/drain3.bin).",
+    )
     p_parse.set_defaults(func=_cmd_parse)
 
     p_feat = sub.add_parser(
@@ -289,6 +355,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fixed anomaly threshold. If omitted, the best-F1 threshold is chosen.",
     )
     p_score.set_defaults(func=_cmd_score)
+
+    p_serve = sub.add_parser(
+        "serve",
+        help="Stream-score logs from an Elasticsearch index into a destination index.",
+    )
+    p_serve.add_argument("--model", required=True, help="Path to a trained model.")
+    p_serve.add_argument(
+        "--drain3-state", help="Drain3 template state (default: models/drain3.bin)."
+    )
+    p_serve.add_argument(
+        "--vocab", help="Event vocab from training (default: models/vocab.npy)."
+    )
+    p_serve.add_argument(
+        "--es-url", default="http://localhost:9200", help="Elasticsearch URL."
+    )
+    p_serve.add_argument(
+        "--source-index", default="logs-raw-*",
+        help="Index pattern to read raw logs from.",
+    )
+    p_serve.add_argument(
+        "--dest-index", default="logs-scored",
+        help="Index to write per-session anomaly scores into.",
+    )
+    p_serve.add_argument(
+        "--interval", type=float, default=30.0,
+        help="Seconds between polls.",
+    )
+    p_serve.add_argument("--batch-size", type=int, default=5000)
+    p_serve.add_argument(
+        "--threshold", type=float, default=None,
+        help="Optional anomaly threshold (adds is_anomaly flag to scored docs).",
+    )
+    p_serve.add_argument(
+        "--max-iters", type=int, default=None,
+        help="Stop after N polls (default: run forever).",
+    )
+    p_serve.set_defaults(func=_cmd_serve)
 
     return parser
 

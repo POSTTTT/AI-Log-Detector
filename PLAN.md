@@ -81,7 +81,7 @@ Two viable starting points:
 
 ---
 
-## Phase 4 — Pipeline & Ingestion (2–4 days)
+## Phase 4 — Pipeline & Ingestion (2–4 days) ✅ complete
 
 14. CLI:
     - `detect train --input logs.csv --model isoforest`
