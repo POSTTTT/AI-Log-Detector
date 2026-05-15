@@ -1,0 +1,34 @@
+# Filebeat config: tail every *.log under /logs (mounted from host data/live/)
+# and ship each line as a JSON doc into Elasticsearch.
+
+filebeat.inputs:
+  - type: filestream
+    id: log-detector-files
+    paths:
+      - /logs/*.log
+    # Each line becomes a single event. The raw text lives in 'message'.
+    # On Docker Desktop / WSL2 bind mounts inotify is unreliable, so we
+    # force the scanner to poll the directory every 2s instead.
+    prospector.scanner.check_interval: 2s
+    prospector.scanner.fingerprint.enabled: false
+    file_identity.native: ~
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "logs-raw-%{+yyyy.MM.dd}"
+
+setup.template.name: "logs-raw"
+setup.template.pattern: "logs-raw-*"
+setup.template.enabled: true
+setup.ilm.enabled: false
+
+# Log to stdout so `docker logs` is useful for debugging.
+logging.level: info
+logging.to_files: false
+
+processors:
+  - add_host_metadata: ~
+  - add_fields:
+      target: ""
+      fields:
+        ingest_pipeline: log-detector

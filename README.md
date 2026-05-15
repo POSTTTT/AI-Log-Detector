@@ -7,7 +7,8 @@ AI-Driven Log Anomaly Detector — feeds system or network logs into unsupervise
 - **Phase 1 — Foundation** complete. Project scaffold, CLI skeleton, dataset downloader.
 - **Phase 2 — Parsing & Features** complete. Drain3 template mining, session grouping by `block_id`, count-matrix feature builder with stratified train/test split.
 - **Phase 3 — Models** complete. Isolation Forest baseline + dense PyTorch autoencoder, with PR/ROC/F1 evaluation and best-F1 threshold selection.
-- Phase 4 (ELK ingestion) and beyond — see [PLAN.md](PLAN.md).
+- **Phase 4 — Pipeline & Ingestion** complete. Dockerized Elasticsearch + Kibana + Filebeat stack, batch-poll streaming scorer with Drain3 state persistence, and a synthetic log injector for demos.
+- Phase 5 (Demo & Polish) — see [PLAN.md](PLAN.md).
 
 ## Setup
 
@@ -51,8 +52,37 @@ Extras required by phase:
 - `[parse]` (Drain3) — for `detect parse`
 - `[ml]` (scikit-learn) — for `detect train --model iforest`
 - `[torch]` (PyTorch) — for `detect train --model autoencoder`
+- `[stream]` (elasticsearch) — for `detect serve`
 
-Install everything with `pip install -e ".[parse,ml,torch,dev]"` or `pip install -e ".[all]"`.
+Install everything with `pip install -e ".[parse,ml,torch,stream,dev]"` or `pip install -e ".[all]"`.
+
+## Live streaming (Phase 4 — ELK + scorer)
+
+The `docker/` directory ships an Elasticsearch + Kibana + Filebeat stack.
+Filebeat tails any `*.log` file under `data/live/`, ships each line to the
+`logs-raw-*` index, and the `detect serve` loop reads new docs, scores
+them with your trained model, and writes results into `logs-scored`.
+
+```powershell
+# 1. Train the offline pipeline first (creates models/iforest.bin,
+#    models/drain3.bin, models/vocab.npy).
+detect parse --dataset HDFS_v1
+detect features --dataset HDFS_v1
+detect train --model iforest
+
+# 2. Bring up the ELK stack.
+docker compose -f docker/docker-compose.yml up -d
+
+# 3. Drip-feed some synthetic logs (writes to data/live/app.log).
+python scripts/inject_logs.py --blocks 20 --anomalies 3 --rate 5
+
+# 4. In another terminal, run the scorer.
+detect serve --model models/iforest.bin --threshold 0.0 --interval 10
+
+# 5. Open Kibana at http://localhost:5601 and query the `logs-scored` index.
+```
+
+Bring it down with `docker compose -f docker/docker-compose.yml down`.
 
 ## Project Layout
 
@@ -69,11 +99,19 @@ Install everything with `pip install -e ".[parse,ml,torch,dev]"` or `pip install
 │   ├── sessions.py         # Group events by block_id / time window
 │   ├── features.py         # Count matrix, label join, stratified split
 │   ├── evaluate.py         # Precision/recall/F1, ROC/PR-AUC, best-F1 threshold
+│   ├── streaming.py        # ES batch-poll scoring loop
 │   └── models/             # Detector implementations
 │       ├── base.py         # Detector abstract base
 │       ├── iforest.py      # IsolationForestDetector
 │       ├── autoencoder.py  # AutoencoderDetector (PyTorch)
 │       └── registry.py     # build_detector / load_detector
+├── docker/
+│   ├── docker-compose.yml  # Elasticsearch + Kibana + Filebeat (8.x)
+│   ├── filebeat/
+│   │   └── filebeat.yml    # tails data/live/*.log, ships to logs-raw-*
+│   └── .env.example        # copy to .env to pin a specific Elastic version
+├── scripts/
+│   └── inject_logs.py      # synthetic HDFS-style log generator for demos
 ├── tests/                  # Smoke tests
 ├── data/
 │   ├── raw/                # Downloaded datasets (gitignored)

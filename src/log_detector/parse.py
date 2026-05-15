@@ -75,8 +75,13 @@ def iter_hdfs_lines(path: Path, limit: int | None = None) -> Iterator[ParsedLine
                 yield pl
 
 
-def _make_miner():
-    """Build a Drain3 TemplateMiner with sensible defaults. Imported lazily."""
+def _make_miner(state_path: Path | None = None):
+    """Build a Drain3 TemplateMiner with sensible defaults. Imported lazily.
+
+    If ``state_path`` is given, Drain3 will persist (and load) its template
+    state to that file — allowing the scorer to reuse the exact same
+    template IDs that were assigned at training time.
+    """
     from drain3 import TemplateMiner
     from drain3.template_miner_config import TemplateMinerConfig
 
@@ -84,6 +89,11 @@ def _make_miner():
     config.profiling_enabled = False
     config.drain_sim_th = 0.4
     config.drain_depth = 4
+
+    if state_path is not None:
+        from drain3.file_persistence import FilePersistence
+
+        return TemplateMiner(persistence_handler=FilePersistence(str(state_path)), config=config)
     return TemplateMiner(config=config)
 
 
@@ -91,6 +101,7 @@ def mine_templates(
     lines: Iterable[ParsedLine],
     *,
     show_progress: bool = False,
+    state_path: Path | None = None,
 ) -> pd.DataFrame:
     """Run Drain3 over parsed lines and return a DataFrame keyed by line_id.
 
@@ -98,7 +109,7 @@ def mine_templates(
         line_id, date, time, pid, level, component, content,
         block_ids, event_id, template
     """
-    miner = _make_miner()
+    miner = _make_miner(state_path=state_path)
     rows: list[dict] = []
     iterator = tqdm(lines, desc="drain3", unit="lines") if show_progress else lines
     for pl in iterator:
@@ -117,6 +128,10 @@ def mine_templates(
                 "template": result["template_mined"],
             }
         )
+    # Drain3's FilePersistence flushes on a snapshot interval (default 60s);
+    # force a final save so the scorer can load the same template clusters.
+    if state_path is not None:
+        miner.save_state("training_complete")
     return pd.DataFrame(rows)
 
 
@@ -125,6 +140,11 @@ def parse_hdfs_log(
     *,
     limit: int | None = None,
     show_progress: bool = False,
+    state_path: Path | None = None,
 ) -> pd.DataFrame:
     """End-to-end: read HDFS log → parse lines → mine templates → DataFrame."""
-    return mine_templates(iter_hdfs_lines(path, limit=limit), show_progress=show_progress)
+    return mine_templates(
+        iter_hdfs_lines(path, limit=limit),
+        show_progress=show_progress,
+        state_path=state_path,
+    )
